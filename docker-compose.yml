@@ -1,0 +1,46 @@
+version: '3.9'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: owasp-scanner-backend
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - backend-data:/app/data
+      - backend-uploads:/app/uploads
+      - backend-reports:/app/reports
+      - owasp-nvd-data:/opt/dependency-check-data
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: owasp-scanner-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  backend-data:
+    driver: local
+  backend-uploads:
+    driver: local
+  backend-reports:
+    driver: local
+  owasp-nvd-data:
+    driver: local
+    # Persists the NVD database across container restarts — avoids re-downloading on every restart

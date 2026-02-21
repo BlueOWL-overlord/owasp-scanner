@@ -1,0 +1,57 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gray-950 text-gray-100 font-sans;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-secondary {
+    @apply bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg font-medium transition-colors;
+  }
+
+  .btn-danger {
+    @apply bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-medium transition-colors;
+  }
+
+  .card {
+    @apply bg-gray-900 border border-gray-800 rounded-xl p-6;
+  }
+
+  .input {
+    @apply w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-gray-100
+           focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent
+           placeholder-gray-500;
+  }
+
+  .label {
+    @apply block text-sm font-medium text-gray-400 mb-1;
+  }
+
+  .badge-critical {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-red-900/50 text-red-400 border border-red-800;
+  }
+
+  .badge-high {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-orange-900/50 text-orange-400 border border-orange-800;
+  }
+
+  .badge-medium {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-yellow-900/50 text-yellow-400 border border-yellow-800;
+  }
+
+  .badge-low {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-blue-900/50 text-blue-400 border border-blue-800;
+  }
+
+  .badge-unknown {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-gray-800 text-gray-400 border border-gray-700;
+  }
+}
