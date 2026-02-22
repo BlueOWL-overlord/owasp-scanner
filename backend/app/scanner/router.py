@@ -196,7 +196,10 @@ def get_scan_log(
     if not scan or scan.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Scan not found")
 
-    log_path = os.path.join(settings.REPORTS_DIR, str(scan_id), "scan.log")
+    base_dir = os.path.realpath(settings.REPORTS_DIR)
+    log_path = os.path.realpath(os.path.join(base_dir, str(scan_id), "scan.log"))
+    if not log_path.startswith(base_dir + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid scan path")
     if not os.path.exists(log_path):
         status_msg = {
             "pending": "Scan is queued — log will appear when it starts.",
