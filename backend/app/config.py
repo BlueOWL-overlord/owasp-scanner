@@ -1,6 +1,7 @@
 import os
 import platform
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 
 _IS_WINDOWS = platform.system() == "Windows"
 _HOME = os.path.expanduser("~")
@@ -16,10 +17,23 @@ def _win(windows_val: str, linux_val: str) -> str:
     return windows_val if _IS_WINDOWS else linux_val
 
 
+_WEAK_KEY = "change-me-in-production-use-random-32-chars"
+
+
 class Settings(BaseSettings):
-    SECRET_KEY: str = "change-me-in-production-use-random-32-chars"
+    SECRET_KEY: str = _WEAK_KEY
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+
+    @field_validator("SECRET_KEY")
+    @classmethod
+    def secret_key_must_be_strong(cls, v: str) -> str:
+        if v == _WEAK_KEY or len(v) < 32:
+            raise ValueError(
+                "SECRET_KEY is not set or too short. "
+                "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+            )
+        return v
 
     DATABASE_URL: str = "sqlite:///./data/app.db"
 

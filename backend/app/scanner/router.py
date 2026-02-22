@@ -2,11 +2,16 @@ import asyncio
 import csv
 import io
 import os
+import re
 import uuid
+from pathlib import Path
 from typing import List, Optional
+from urllib.parse import quote
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, BackgroundTasks
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from sqlmodel import Session, select
+
+MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
 
 from app.auth.models import User
 from app.auth.utils import get_current_user
@@ -35,12 +40,23 @@ async def upload_and_scan(
             detail=f"Unsupported file type. Supported: jar, war, ear, zip, sar, apk, nupkg, egg, wheel, tar, gz",
         )
 
-    # Save uploaded file
-    safe_name = f"{uuid.uuid4()}_{file.filename}"
+    # Read content first so we can check size before touching disk
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large (max 500 MB)")
+
+    # Use only the extension from the original name — never the filename itself
+    ext = Path(file.filename).suffix.lower()
+    safe_name = f"{uuid.uuid4()}{ext}"
     file_path = os.path.join(settings.UPLOAD_DIR, safe_name)
 
+    # Guard against path traversal
+    upload_abs = os.path.abspath(settings.UPLOAD_DIR)
+    file_abs   = os.path.abspath(file_path)
+    if not file_abs.startswith(upload_abs + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
     with open(file_path, "wb") as f:
-        content = await file.read()
         f.write(content)
 
     # Create scan record
@@ -255,12 +271,14 @@ def export_csv(
         ])
 
     output.seek(0)
-    safe_name = scan.original_filename.replace('"', '')
-    filename = f"scan-{scan_id}-{safe_name}.csv"
+    # Strip to safe ASCII chars only, then RFC 5987-encode for the header
+    ascii_name = re.sub(r'[^\w\s.-]', '_', scan.original_filename)[:60]
+    filename   = f"scan-{scan_id}-{ascii_name}.csv"
+    encoded    = quote(filename, safe='')
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"},
     )
 
 

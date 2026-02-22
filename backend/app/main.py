@@ -32,8 +32,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://localhost:5173", "http://frontend:3000"],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 app.include_router(auth_router)
@@ -43,4 +43,4 @@ app.include_router(integrations_router)
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "owasp-scanner-api"}
+    return {"status": "ok"}
