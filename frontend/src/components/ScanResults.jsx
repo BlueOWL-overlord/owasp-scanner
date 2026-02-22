@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Brain, Download, Filter, AlertTriangle, CheckCircle, Loader } from 'lucide-react'
+import { Brain, Download, FileSpreadsheet, AlertTriangle, CheckCircle, Loader } from 'lucide-react'
 import VulnerabilityCard from './VulnerabilityCard'
 import { scansAPI } from '../services/api'
 
@@ -64,6 +64,16 @@ export default function ScanResults({ scan, onRefresh }) {
     a.href = url
     a.download = `scan-${scan.id}-report.json`
     a.click()
+  }
+
+  const handleExportCSV = async () => {
+    const { data } = await scansAPI.exportCSV(scan.id)
+    const url = URL.createObjectURL(new Blob([data], { type: 'text/csv' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `scan-${scan.id}-${scan.original_filename}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   const fpCount = vulns.filter((v) => v.ai_is_false_positive).length
@@ -150,8 +160,11 @@ export default function ScanResults({ scan, onRefresh }) {
               <><Brain size={14} /> AI Analyze {selectedIds.length > 0 ? `(${selectedIds.length})` : 'All'}</>
             )}
           </button>
+          <button onClick={handleExportCSV} className="btn-secondary flex items-center gap-1.5 text-sm py-2">
+            <FileSpreadsheet size={14} /> CSV
+          </button>
           <button onClick={handleDownload} className="btn-secondary flex items-center gap-1.5 text-sm py-2">
-            <Download size={14} /> Report
+            <Download size={14} /> JSON
           </button>
         </div>
       </div>

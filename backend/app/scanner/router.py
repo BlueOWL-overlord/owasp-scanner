@@ -1,9 +1,11 @@
 import asyncio
+import csv
+import io
 import os
 import uuid
 from typing import List, Optional
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, BackgroundTasks
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from sqlmodel import Session, select
 
 from app.auth.models import User
@@ -188,6 +190,78 @@ def get_scan_log(
 
     with open(log_path, "r", encoding="utf-8", errors="replace") as f:
         return PlainTextResponse(f.read())
+
+
+@router.get("/{scan_id}/export/csv")
+def export_csv(
+    scan_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Export scan vulnerabilities as a CSV file."""
+    scan = session.get(Scan, scan_id)
+    if not scan or scan.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    vulns = session.exec(
+        select(Vulnerability).where(Vulnerability.scan_id == scan_id)
+    ).all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Dependency Name",
+        "File Path",
+        "Version",
+        "CVE ID",
+        "Severity",
+        "CVSS V3 Score",
+        "CVSS V2 Score",
+        "Remediation Suggestion",
+        "AI Analysis",
+        "False Positive",
+        "Suppressed",
+    ])
+
+    for v in vulns:
+        # Build remediation suggestion from AI analysis or a standard NVD link
+        if v.ai_analysis:
+            remediation = v.ai_analysis
+        else:
+            remediation = (
+                f"Update {v.dependency_name} to the latest patched version. "
+                f"Review the advisory at https://nvd.nist.gov/vuln/detail/{v.cve_id}"
+            )
+
+        if v.ai_is_false_positive is True:
+            fp_label = "Yes"
+        elif v.ai_is_false_positive is False:
+            fp_label = "No"
+        else:
+            fp_label = "Not analysed"
+
+        writer.writerow([
+            v.dependency_name,
+            v.dependency_file or "",
+            v.dependency_version or "",
+            v.cve_id,
+            v.severity,
+            v.cvss_v3 if v.cvss_v3 is not None else "",
+            v.cvss_v2 if v.cvss_v2 is not None else "",
+            remediation,
+            v.ai_reasoning or "",
+            fp_label,
+            "Yes" if v.is_suppressed else "No",
+        ])
+
+    output.seek(0)
+    safe_name = scan.original_filename.replace('"', '')
+    filename = f"scan-{scan_id}-{safe_name}.csv"
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/{scan_id}/report")

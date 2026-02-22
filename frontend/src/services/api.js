@@ -52,6 +52,8 @@ export const scansAPI = {
     api.patch(`/scans/${scanId}/vulnerabilities/${vulnId}/suppress`),
   downloadReport: (scanId) =>
     api.get(`/scans/${scanId}/report`, { responseType: 'blob' }),
+  exportCSV: (scanId) =>
+    api.get(`/scans/${scanId}/export/csv`, { responseType: 'blob' }),
   getLog: (scanId) =>
     api.get(`/scans/${scanId}/log`, { responseType: 'text', transformResponse: [(d) => d] }),
 }
