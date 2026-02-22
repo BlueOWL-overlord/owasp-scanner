@@ -23,7 +23,6 @@ export default function LoginPage() {
         return
       }
       const { data } = await authAPI.login({ username: form.username, password: form.password })
-      localStorage.setItem('token', data.access_token)
       localStorage.setItem('user', JSON.stringify(data.user))
       navigate('/')
     } catch (err) {

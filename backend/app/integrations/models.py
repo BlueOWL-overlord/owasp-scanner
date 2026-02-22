@@ -1,8 +1,21 @@
+import base64
+import hashlib
+import json
+import secrets
 from typing import Optional, Any, Dict
 from datetime import datetime
 from enum import Enum
 from sqlmodel import Field, SQLModel
-import json
+from cryptography.fernet import Fernet, InvalidToken
+
+# Fields whose values are encrypted at rest
+_SENSITIVE_KEYS = {"pat", "token", "secret_access_key", "password", "api_key"}
+
+
+def _fernet() -> Fernet:
+    from app.config import settings
+    key_material = hashlib.sha256(settings.SECRET_KEY.encode()).digest()
+    return Fernet(base64.urlsafe_b64encode(key_material))
 
 
 class IntegrationType(str, Enum):
@@ -18,16 +31,37 @@ class Integration(SQLModel, table=True):
     user_id: int = Field(foreign_key="users.id", index=True)
     name: str
     type: IntegrationType
-    config: str = Field(default="{}")  # JSON
+    config: str = Field(default="{}")  # JSON with sensitive values encrypted
+    webhook_token: str = Field(default_factory=lambda: secrets.token_urlsafe(32))
     is_active: bool = Field(default=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_used_at: Optional[datetime] = None
 
     def get_config(self) -> dict:
-        return json.loads(self.config)
+        """Return config dict with sensitive fields decrypted."""
+        raw = json.loads(self.config)
+        f = _fernet()
+        result = {}
+        for k, v in raw.items():
+            if k in _SENSITIVE_KEYS and v and isinstance(v, str):
+                try:
+                    result[k] = f.decrypt(v.encode()).decode()
+                except (InvalidToken, Exception):
+                    result[k] = v  # backwards-compat: plain text (not yet encrypted)
+            else:
+                result[k] = v
+        return result
 
     def set_config(self, data: dict):
-        self.config = json.dumps(data)
+        """Encrypt sensitive fields and store as JSON."""
+        f = _fernet()
+        to_store = {}
+        for k, v in data.items():
+            if k in _SENSITIVE_KEYS and v and isinstance(v, str):
+                to_store[k] = f.encrypt(v.encode()).decode()
+            else:
+                to_store[k] = v
+        self.config = json.dumps(to_store)
 
 
 class IntegrationCreate(SQLModel):
@@ -42,6 +76,7 @@ class IntegrationRead(SQLModel):
     name: str
     type: IntegrationType
     config: Dict[str, Any]
+    webhook_token: str
     is_active: bool
     created_at: datetime
     last_used_at: Optional[datetime]

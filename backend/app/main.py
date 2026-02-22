@@ -1,14 +1,16 @@
 import asyncio
 import platform
-import sys
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
-from app.database import create_db_and_tables
+from app.database import create_db_and_tables, migrate_db
 from app.auth.router import router as auth_router
 from app.scanner.router import router as scanner_router
 from app.integrations.router import router as integrations_router
+from app.limiter import limiter
 
 # Windows requires ProactorEventLoop for asyncio subprocesses (uvicorn uses SelectorEventLoop by default)
 if platform.system() == "Windows":
@@ -18,6 +20,7 @@ if platform.system() == "Windows":
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     create_db_and_tables()
+    migrate_db()
     yield
 
 
@@ -27,6 +30,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,

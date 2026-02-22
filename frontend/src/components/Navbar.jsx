@@ -1,13 +1,14 @@
 import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { Shield, Upload, LayoutDashboard, GitBranch, LogOut, User } from 'lucide-react'
+import { authAPI } from '../services/api'
 
 export default function Navbar() {
   const navigate = useNavigate()
   const location = useLocation()
   const user = JSON.parse(localStorage.getItem('user') || '{}')
 
-  const handleLogout = () => {
-    localStorage.removeItem('token')
+  const handleLogout = async () => {
+    try { await authAPI.logout() } catch { /* server-side cookie cleared best-effort */ }
     localStorage.removeItem('user')
     navigate('/login')
   }

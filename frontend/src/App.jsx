@@ -7,8 +7,8 @@ import IntegrationsPage from './pages/IntegrationsPage'
 import Layout from './components/Layout'
 
 function ProtectedRoute({ children }) {
-  const token = localStorage.getItem('token')
-  return token ? children : <Navigate to="/login" replace />
+  const user = localStorage.getItem('user')
+  return user ? children : <Navigate to="/login" replace />
 }
 
 export default function App() {

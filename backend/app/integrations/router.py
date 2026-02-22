@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 import os
 import asyncio
@@ -21,6 +22,8 @@ from app.integrations.jenkins import trigger_jenkins_job, get_jenkins_jobs
 from app.integrations.aws import trigger_codepipeline, list_codepipelines
 from app.scanner.models import Scan, ScanStatus, ScanRead
 from app.scanner.owasp import run_dependency_check
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
@@ -112,8 +115,11 @@ async def trigger_pipeline(
 
         return {"status": "triggered", "result": result}
 
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to trigger pipeline: {str(exc)}")
+        logger.error("trigger_pipeline error for integration %s: %s", integration_id, exc, exc_info=True)
+        raise HTTPException(status_code=502, detail="Failed to trigger pipeline")
 
 
 @router.post("/{integration_id}/list-resources", response_model=dict)
@@ -153,7 +159,8 @@ async def list_resources(
 
         return {"resources": resources}
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to list resources: {str(exc)}")
+        logger.error("list_resources error for integration %s: %s", integration_id, exc, exc_info=True)
+        raise HTTPException(status_code=502, detail="Failed to list resources")
 
 
 # Webhook endpoint — CI/CD pipelines POST results here
@@ -166,19 +173,18 @@ async def webhook_receive(
 ):
     """
     Webhook endpoint for CI/CD systems to submit scan artifacts.
-    The token is used to identify which user/integration to associate the scan with.
-
-    In production, implement proper webhook token validation.
+    The token identifies the integration; requests with an unknown token are rejected.
     """
-    # For demo: find integration matching source
+    # C1: Look up integration by its unique webhook token
     integration = session.exec(
-        select(Integration).where(Integration.type == payload.source)
+        select(Integration).where(Integration.webhook_token == token)
     ).first()
 
-    user_id = integration.user_id if integration else 1
+    if not integration:
+        raise HTTPException(status_code=401, detail="Invalid webhook token")
 
     scan = Scan(
-        user_id=user_id,
+        user_id=integration.user_id,
         filename=f"webhook_{payload.project_name}",
         original_filename=payload.project_name,
         status=ScanStatus.PENDING,
@@ -206,8 +212,10 @@ async def _download_and_scan(scan_id: int, artifact_url: str, session: Session):
             resp = await client.get(artifact_url)
             resp.raise_for_status()
 
-        filename = artifact_url.split("/")[-1] or f"artifact_{scan_id}.jar"
-        file_path = os.path.join(settings.UPLOAD_DIR, f"{uuid.uuid4()}_{filename}")
+        # Use only extension from URL — never embed URL segments in filename (path traversal)
+        url_basename = artifact_url.split("/")[-1].split("?")[0]
+        ext = os.path.splitext(url_basename)[1].lower() or ".jar"
+        file_path = os.path.join(settings.UPLOAD_DIR, f"{uuid.uuid4()}{ext}")
 
         with open(file_path, "wb") as f:
             f.write(resp.content)
@@ -216,18 +224,19 @@ async def _download_and_scan(scan_id: int, artifact_url: str, session: Session):
             await run_dependency_check(scan_id, file_path, s)
 
     except Exception as exc:
+        logger.error("_download_and_scan error for scan %s: %s", scan_id, exc, exc_info=True)
         with Session(session.bind) as s:
             scan = s.get(Scan, scan_id)
             if scan:
                 scan.status = ScanStatus.FAILED
-                scan.error_message = f"Failed to download/scan artifact: {str(exc)}"
+                scan.error_message = "Failed to download or scan artifact"
                 s.add(scan)
                 s.commit()
 
 
 def _to_read(integration: Integration) -> IntegrationRead:
     config = integration.get_config()
-    # Mask sensitive fields
+    # Mask sensitive fields before returning to client
     safe_config = {
         k: ("***" if k in {"pat", "token", "secret_access_key", "password"} else v)
         for k, v in config.items()
@@ -238,6 +247,7 @@ def _to_read(integration: Integration) -> IntegrationRead:
         name=integration.name,
         type=integration.type,
         config=safe_config,
+        webhook_token=integration.webhook_token,
         is_active=integration.is_active,
         created_at=integration.created_at,
         last_used_at=integration.last_used_at,
