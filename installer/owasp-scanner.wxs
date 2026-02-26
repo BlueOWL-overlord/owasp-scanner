@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX v3 installer for OWASP Dependency Scanner.
+
+  Build prerequisites:
+    WiX Toolset v3  https://github.com/wixtoolset/wix3/releases
+    (heat.exe, candle.exe, light.exe must be on PATH)
+
+  The build-msi.ps1 script handles harvesting and compilation automatically.
+  Do NOT run this file manually — invoke build-msi.ps1 instead.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+
+  <Product Id="*"
+           Name="OWASP Dependency Scanner"
+           Language="1033"
+           Version="1.0.0"
+           Manufacturer="OWASP Scanner Project"
+           UpgradeCode="6E8B3C1A-4D27-4F9E-B2A5-3C7E9F8D0B1E">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Description="OWASP Dependency Scanner — standalone installer"
+             Comments="Installs the OWASP Dependency Scanner web application." />
+
+    <!-- ------------------------------------------------------------------ -->
+    <!-- Upgrade handling                                                     -->
+    <!-- ------------------------------------------------------------------ -->
+    <MajorUpgrade
+        Schedule="afterInstallInitialize"
+        DowngradeErrorMessage="A newer version of OWASP Dependency Scanner is already installed." />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- ------------------------------------------------------------------ -->
+    <!-- Properties                                                           -->
+    <!-- ------------------------------------------------------------------ -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <!-- Detect Java 11+ in the registry (Eclipse Temurin / Oracle / OpenJDK) -->
+    <Property Id="JAVA_EXE">
+      <RegistrySearch Id="JavaExeFromTemurin"
+                      Root="HKLM"
+                      Key="SOFTWARE\Eclipse Adoptium\JDK"
+                      Name="Path"
+                      Type="raw"
+                      Win64="yes" />
+    </Property>
+    <!-- Fallback: check JAVA_HOME env var -->
+    <Property Id="JAVA_HOME_ENV">
+      <RegistrySearch Id="JavaHomeEnv"
+                      Root="HKLM"
+                      Key="SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+                      Name="JAVA_HOME"
+                      Type="raw"
+                      Win64="yes" />
+    </Property>
+
+    <!-- ------------------------------------------------------------------ -->
+    <!-- Prerequisites check                                                  -->
+    <!-- ------------------------------------------------------------------ -->
+    <Condition Message="Java 11 or later is required to run OWASP Dependency Check. &#xA;&#xA;Please install Java from https://adoptium.net and re-run this installer.">
+      <![CDATA[Installed OR JAVA_EXE OR JAVA_HOME_ENV]]>
+    </Condition>
+
+    <!-- ------------------------------------------------------------------ -->
+    <!-- Directory structure                                                  -->
+    <!-- ------------------------------------------------------------------ -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+
+      <!-- Installation root -->
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="OWASP Scanner">
+          <!-- PyInstaller bundle files are harvested into AppFiles.wxs -->
+        </Directory>
+      </Directory>
+
+      <!-- Shortcuts -->
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="OWASP Scanner" />
+      </Directory>
+
+      <Directory Id="DesktopFolder" Name="Desktop" />
+
+    </Directory>
+
+    <!-- ------------------------------------------------------------------ -->
+    <!-- Features                                                             -->
+    <!-- ------------------------------------------------------------------ -->
+    <Feature Id="ProductFeature"
+             Title="OWASP Dependency Scanner"
+             Description="The scanner application (backend + frontend)."
+             Level="1"
+             ConfigurableDirectory="INSTALLFOLDER"
+             AllowAdvertise="no"
+             InstallDefault="local">
+      <ComponentGroupRef Id="AppFileComponents" />  <!-- harvested by heat.exe -->
+      <ComponentRef Id="ShortcutsComponent" />
+    </Feature>
+
+    <Feature Id="OWASPDCFeature"
+             Title="OWASP Dependency Check"
+             Description="Bundles the OWASP Dependency Check tool (Java required). Omit to download on first scan."
+             Level="1"
+             AllowAdvertise="no"
+             InstallDefault="local">
+      <ComponentGroupRef Id="OWASPDCComponents" />  <!-- harvested by heat.exe if present -->
+    </Feature>
+
+    <!-- ------------------------------------------------------------------ -->
+    <!-- Shortcuts component                                                  -->
+    <!-- ------------------------------------------------------------------ -->
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="ShortcutsComponent"
+                 Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+
+        <!-- Start Menu shortcut -->
+        <Shortcut Id="StartMenuShortcut"
+                  Name="OWASP Dependency Scanner"
+                  Description="Launch the OWASP Dependency Scanner web application"
+                  Target="[INSTALLFOLDER]owasp-scanner.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+
+        <!-- Desktop shortcut -->
+        <Shortcut Id="DesktopShortcut"
+                  Directory="DesktopFolder"
+                  Name="OWASP Dependency Scanner"
+                  Description="Launch the OWASP Dependency Scanner web application"
+                  Target="[INSTALLFOLDER]owasp-scanner.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+
+        <!-- Uninstall shortcut -->
+        <Shortcut Id="UninstallShortcut"
+                  Name="Uninstall OWASP Dependency Scanner"
+                  Target="[SystemFolder]msiexec.exe"
+                  Arguments="/x [ProductCode]" />
+
+        <RemoveFolder Id="CleanUpShortcutFolder"
+                      Directory="ApplicationProgramsFolder"
+                      On="uninstall" />
+
+        <RegistryValue Root="HKCU"
+                       Key="Software\OWASPScanner"
+                       Name="installed"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- ------------------------------------------------------------------ -->
+    <!-- UI                                                                   -->
+    <!-- ------------------------------------------------------------------ -->
+    <UIRef Id="WixUI_InstallDir" />
+
+    <!-- Skip the licence dialog — replace with your own EULA .rtf if desired -->
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
+
+    <!-- ------------------------------------------------------------------ -->
+    <!-- Post-install: launch the application                                 -->
+    <!-- ------------------------------------------------------------------ -->
+    <CustomAction Id="LaunchApp"
+                  FileKey="owasp_scanner_exe"
+                  ExeCommand=""
+                  Return="asyncNoWait"
+                  Impersonate="yes" />
+
+    <InstallExecuteSequence>
+      <Custom Action="LaunchApp" After="InstallFinalize">NOT Installed</Custom>
+    </InstallExecuteSequence>
+
+  </Product>
+</Wix>

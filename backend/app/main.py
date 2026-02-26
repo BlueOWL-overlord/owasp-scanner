@@ -50,3 +50,37 @@ app.include_router(integrations_router)
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+def _find_frontend_dist() -> str | None:
+    """Locate the React production build directory.
+
+    Checks (in order):
+    1. FRONTEND_DIST_PATH env var (set by standalone launcher)
+    2. PyInstaller bundle directory (_MEIPASS)
+    3. Source-tree location (backend/app/main.py → project-root/frontend/dist)
+    """
+    import os
+    import sys
+
+    p = os.environ.get("FRONTEND_DIST_PATH")
+    if p and os.path.isdir(p):
+        return p
+
+    if getattr(sys, "frozen", False):
+        p = os.path.join(sys._MEIPASS, "frontend", "dist")
+        if os.path.isdir(p):
+            return p
+
+    here = os.path.dirname(os.path.abspath(__file__))   # backend/app/
+    p = os.path.normpath(os.path.join(here, "..", "..", "frontend", "dist"))
+    if os.path.isdir(p):
+        return p
+
+    return None
+
+
+_dist = _find_frontend_dist()
+if _dist:
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/", StaticFiles(directory=_dist, html=True), name="static")
