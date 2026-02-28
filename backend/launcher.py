@@ -114,6 +114,15 @@ def main() -> None:
             else (install_dir.parent / "frontend" / "dist")
         ),
     }
+
+    # Use the bundled JRE when present (installed via MSI)
+    bundled_jre = install_dir / "jre"
+    if bundled_jre.is_dir():
+        os.environ.setdefault("JAVA_HOME", str(bundled_jre))
+        java_bin = bundled_jre / "bin"
+        current_path = os.environ.get("PATH", "")
+        if str(java_bin) not in current_path:
+            os.environ["PATH"] = str(java_bin) + os.pathsep + current_path
     for key, val in overrides.items():
         os.environ.setdefault(key, val)
 

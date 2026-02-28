@@ -1,294 +1,311 @@
 <#
 .SYNOPSIS
-    Build a standalone Windows MSI installer for OWASP Dependency Scanner.
+    Build a fully self-contained Windows MSI for OWASP Dependency Scanner.
 
 .DESCRIPTION
-    Automates the full build pipeline:
-      1. Verify prerequisites (Python, Node.js, WiX v3, PyInstaller)
-      2. Build the React frontend  (npm run build)
-      3. Bundle the Python backend with PyInstaller
-      4. Optionally download + bundle OWASP Dependency Check
-      5. Harvest bundled files with WiX heat.exe
-      6. Compile + link the MSI with candle.exe / light.exe
+    Everything is bundled -- Java JRE, OWASP Dependency Check, and the Python
+    backend.  The resulting MSI installs and runs without any prerequisites on
+    the target machine.
 
-.PARAMETER BundleOWASPDC
-    Switch. If specified the script downloads OWASP Dependency Check and
-    embeds it inside the MSI (adds ~200 MB).  Without the flag the tool is
-    NOT bundled; users download it automatically on their first scan.
+    Build-time requirements (on the machine running this script):
+      - Python 3.11+  (python.exe on PATH)
+      - Node.js 20+   (node / npm on PATH)
+      WiX v3, Eclipse Temurin JRE, and OWASP DC are downloaded automatically.
 
 .PARAMETER SkipFrontendBuild
-    Switch. Skip `npm run build` (useful if the frontend is already built).
+    Skip `npm run build` (use when frontend/dist already exists).
 
 .PARAMETER SkipPyInstaller
-    Switch. Skip PyInstaller (useful when iterating on the installer only).
+    Skip PyInstaller step (use when dist/owasp-scanner already exists).
+
+.PARAMETER SkipDownloads
+    Skip downloading WiX / JRE / OWASP DC (assume they are already cached in
+    the installer/ directory).
 
 .PARAMETER Version
-    Installer version string (default: 1.0.0).
+    Version string embedded in the MSI (default: 1.0.0).
 
 .EXAMPLE
-    # Standard build
-    .\build-msi.ps1
-
-    # Bundle OWASP DC for an offline installer
-    .\build-msi.ps1 -BundleOWASPDC
-
-    # Re-run only the WiX step (PyInstaller output already exists)
-    .\build-msi.ps1 -SkipFrontendBuild -SkipPyInstaller
+    .\build-msi.ps1                          # full build
+    .\build-msi.ps1 -SkipFrontendBuild       # skip npm build
+    .\build-msi.ps1 -SkipPyInstaller         # WiX-only iteration
+    .\build-msi.ps1 -SkipDownloads           # all assets already cached
 #>
 
 [CmdletBinding()]
 param(
-    [switch]$BundleOWASPDC,
     [switch]$SkipFrontendBuild,
     [switch]$SkipPyInstaller,
+    [switch]$SkipDownloads,
     [string]$Version = "1.0.0"
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-function Write-Step { param([string]$msg) Write-Host "`n==> $msg" -ForegroundColor Cyan }
-function Write-OK   { param([string]$msg) Write-Host "    OK: $msg" -ForegroundColor Green }
-function Write-Warn { param([string]$msg) Write-Host "    WARN: $msg" -ForegroundColor Yellow }
-function Fail       { param([string]$msg) Write-Host "`nERROR: $msg" -ForegroundColor Red; exit 1 }
+# ── helpers ─────────────────────────────────────────────────────────────────
+function Step  { param([string]$m) Write-Host "`n==> $m" -ForegroundColor Cyan }
+function OK    { param([string]$m) Write-Host "    OK: $m" -ForegroundColor Green }
+function Warn  { param([string]$m) Write-Host "    WARN: $m" -ForegroundColor Yellow }
+function Fail  { param([string]$m) Write-Host "`nERROR: $m" -ForegroundColor Red; exit 1 }
 
-function Require-Command {
-    param([string]$cmd, [string]$hint = "")
+function Download {
+    param([string]$Url, [string]$Dest)
+    if (Test-Path $Dest) { OK "Already cached: $(Split-Path $Dest -Leaf)"; return }
+    Write-Host "    Downloading $(Split-Path $Dest -Leaf) ..."
+    Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
+    OK "Downloaded"
+}
+
+# ── paths ────────────────────────────────────────────────────────────────────
+$Root         = $PSScriptRoot
+$BackendDir   = Join-Path $Root "backend"
+$FrontendDir  = Join-Path $Root "frontend"
+$InstallerDir = Join-Path $Root "installer"
+$CacheDir     = Join-Path $InstallerDir "_cache"      # downloaded archives
+$WiXDir       = Join-Path $InstallerDir "_wix"        # extracted WiX binaries
+$JREDir       = Join-Path $InstallerDir "jre"         # bundled JRE
+$OWASPDCDir   = Join-Path $InstallerDir "dependency-check"  # bundled OWASP DC
+$PyDistDir    = Join-Path $BackendDir "dist\owasp-scanner"  # PyInstaller output
+$MsiOut       = Join-Path $Root "owasp-scanner-$Version.msi"
+
+New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
+
+# ── pinned versions & URLs ───────────────────────────────────────────────────
+$WiXVersion   = "3.14.1"
+$WiXUrl       = "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip"
+$WiXZip       = Join-Path $CacheDir "wix314-binaries.zip"
+
+# Eclipse Temurin JRE 21 LTS -- Windows x64 zip
+$JREVersion   = "21.0.5+11"
+$JREUrl       = "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.5%2B11/OpenJDK21U-jre_x64_windows_hotspot_21.0.5_11.zip"
+$JREZip       = Join-Path $CacheDir "temurin-jre-21-win-x64.zip"
+
+# OWASP Dependency Check
+$OWASPDCVer   = "10.0.4"
+$OWASPDCUrl   = "https://github.com/jeremylong/DependencyCheck/releases/download/v$OWASPDCVer/dependency-check-$OWASPDCVer-release.zip"
+$OWASPDCZip   = Join-Path $CacheDir "dependency-check-$OWASPDCVer.zip"
+
+# ── locate / bootstrap WiX ──────────────────────────────────────────────────
+Step "Locating WiX Toolset v3"
+$HeatExe   = Get-Command "heat.exe"   -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+$CandleExe = Get-Command "candle.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+$LightExe  = Get-Command "light.exe"  -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+
+if (-not ($HeatExe -and $CandleExe -and $LightExe)) {
+    Warn "WiX not on PATH -- downloading WiX $WiXVersion binaries..."
+
+    if (-not $SkipDownloads) { Download $WiXUrl $WiXZip }
+
+    if (Test-Path $WiXDir) { Remove-Item $WiXDir -Recurse -Force }
+    Expand-Archive -Path $WiXZip -DestinationPath $WiXDir -Force
+    OK "WiX extracted to $WiXDir"
+
+    $HeatExe   = Join-Path $WiXDir "heat.exe"
+    $CandleExe = Join-Path $WiXDir "candle.exe"
+    $LightExe  = Join-Path $WiXDir "light.exe"
+
+    foreach ($exe in @($HeatExe, $CandleExe, $LightExe)) {
+        if (-not (Test-Path $exe)) { Fail "$exe not found after extracting WiX." }
+    }
+} else {
+    OK "heat=$HeatExe"
+    OK "candle=$CandleExe"
+    OK "light=$LightExe"
+}
+
+# ── check Python / Node ──────────────────────────────────────────────────────
+Step "Checking Python and Node.js"
+foreach ($cmd in @("python", "node", "npm")) {
     if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
-        $msg = "Required command not found: $cmd"
-        if ($hint) { $msg += "`n       $hint" }
-        Fail $msg
+        Fail "$cmd not found on PATH.  Install Python 3.11+ and Node.js 20+."
     }
-    Write-OK "$cmd found"
+    OK "$cmd found"
 }
 
-function Require-PythonPackage {
-    param([string]$pkg)
-    $installed = & python -m pip show $pkg 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Step "Installing Python package: $pkg"
-        & python -m pip install $pkg | Out-Null
-        if ($LASTEXITCODE -ne 0) { Fail "Failed to install $pkg" }
-    }
-    Write-OK "Python package $pkg present"
+# ── build virtual environment ─────────────────────────────────────────────────
+# Use a dedicated venv so we never need admin rights on the system Python.
+$BuildVenv   = Join-Path $BackendDir ".build-venv"
+$PythonExe   = Join-Path $BuildVenv "Scripts\python.exe"
+$PyInstExe   = Join-Path $BuildVenv "Scripts\pyinstaller.exe"
+
+Step "Setting up build virtual environment ($BuildVenv)"
+if (-not (Test-Path $PythonExe)) {
+    & python -m venv $BuildVenv
+    if ($LASTEXITCODE -ne 0) { Fail "Failed to create build venv" }
+    OK "venv created"
+} else {
+    OK "venv already exists"
 }
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-$Root        = $PSScriptRoot
-$BackendDir  = Join-Path $Root "backend"
-$FrontendDir = Join-Path $Root "frontend"
-$InstallerDir= Join-Path $Root "installer"
-$DistDir     = Join-Path $BackendDir "dist\owasp-scanner"   # PyInstaller output
-$OWASPDCDir  = Join-Path $InstallerDir "dependency-check"   # bundled OWASP DC
-$MsiOutput   = Join-Path $Root "owasp-scanner-$Version.msi"
+# Upgrade pip silently
+& $PythonExe -m pip install --upgrade pip --quiet
+if ($LASTEXITCODE -ne 0) { Fail "pip upgrade failed" }
 
-# OWASP DC release to bundle (update as newer releases are available)
-$OWASPDCVersion = "10.0.4"
-$OWASPDCZipUrl  = "https://github.com/jeremylong/DependencyCheck/releases/download/v$OWASPDCVersion/dependency-check-$OWASPDCVersion-release.zip"
-$OWASPDCZipPath = Join-Path $InstallerDir "dependency-check-$OWASPDCVersion-release.zip"
+Step "Installing PyInstaller into build venv"
+& $PythonExe -m pip install pyinstaller --quiet
+if ($LASTEXITCODE -ne 0) { Fail "pip install pyinstaller failed" }
+OK "pyinstaller installed"
 
-# ---------------------------------------------------------------------------
-# Step 0: Check prerequisites
-# ---------------------------------------------------------------------------
-Write-Step "Checking prerequisites"
+Step "Installing backend dependencies into build venv"
+& $PythonExe -m pip install -r (Join-Path $BackendDir "requirements.txt") --quiet
+if ($LASTEXITCODE -ne 0) { Fail "pip install -r requirements.txt failed" }
+OK "backend dependencies installed"
 
-Require-Command "python"  "Install Python 3.11+ from https://python.org"
-Require-Command "node"    "Install Node.js 20+ from https://nodejs.org"
-Require-Command "npm"     "Install Node.js 20+ from https://nodejs.org"
-
-# WiX v3 tools
-foreach ($tool in @("heat", "candle", "light")) {
-    if (-not (Get-Command "$tool.exe" -ErrorAction SilentlyContinue)) {
-        Fail "$tool.exe not found.`n       Install WiX Toolset v3 from https://github.com/wixtoolset/wix3/releases`n       and ensure its bin directory is on your PATH."
-    }
-    Write-OK "$tool.exe found"
-}
-
-# PyInstaller
-Require-PythonPackage "pyinstaller"
-
-# Backend dependencies
-Write-Step "Installing Python dependencies"
-Push-Location $BackendDir
-& python -m pip install -r requirements.txt --quiet
-if ($LASTEXITCODE -ne 0) { Fail "pip install failed" }
-Write-OK "Backend dependencies installed"
-Pop-Location
-
-# ---------------------------------------------------------------------------
-# Step 1: Build frontend
-# ---------------------------------------------------------------------------
+# ── frontend build ───────────────────────────────────────────────────────────
 if (-not $SkipFrontendBuild) {
-    Write-Step "Building React frontend"
+    Step "Building React frontend"
     Push-Location $FrontendDir
     & npm install --silent
     if ($LASTEXITCODE -ne 0) { Fail "npm install failed" }
     & npm run build
     if ($LASTEXITCODE -ne 0) { Fail "npm run build failed" }
     Pop-Location
-    Write-OK "Frontend built to frontend/dist"
+    OK "Frontend built -> frontend/dist"
 } else {
-    Write-Warn "Skipping frontend build (-SkipFrontendBuild)"
+    Warn "Skipping frontend build"
     if (-not (Test-Path (Join-Path $FrontendDir "dist"))) {
-        Fail "frontend/dist does not exist. Build the frontend first."
+        Fail "frontend/dist missing -- run without -SkipFrontendBuild first."
     }
 }
 
-# ---------------------------------------------------------------------------
-# Step 2: Bundle with PyInstaller
-# ---------------------------------------------------------------------------
+# ── PyInstaller ──────────────────────────────────────────────────────────────
 if (-not $SkipPyInstaller) {
-    Write-Step "Bundling backend with PyInstaller"
+    Step "Bundling backend with PyInstaller"
     Push-Location $BackendDir
-    # Clean previous build
-    if (Test-Path "build")       { Remove-Item "build" -Recurse -Force }
-    if (Test-Path "dist")        { Remove-Item "dist"  -Recurse -Force }
-
-    & python -m PyInstaller owasp-scanner.spec --noconfirm
+    if (Test-Path "build") { Remove-Item "build" -Recurse -Force }
+    if (Test-Path "dist")  { Remove-Item "dist"  -Recurse -Force }
+    & $PyInstExe owasp-scanner.spec --noconfirm
     if ($LASTEXITCODE -ne 0) { Fail "PyInstaller failed" }
     Pop-Location
-    Write-OK "PyInstaller bundle created: $DistDir"
+    OK "Bundle -> $PyDistDir"
 } else {
-    Write-Warn "Skipping PyInstaller (-SkipPyInstaller)"
-    if (-not (Test-Path $DistDir)) {
-        Fail "PyInstaller output not found at $DistDir. Run without -SkipPyInstaller first."
+    Warn "Skipping PyInstaller"
+    if (-not (Test-Path $PyDistDir)) {
+        Fail "PyInstaller output missing -- run without -SkipPyInstaller first."
     }
 }
 
-# ---------------------------------------------------------------------------
-# Step 3 (optional): Download and stage OWASP Dependency Check
-# ---------------------------------------------------------------------------
-if ($BundleOWASPDC) {
-    Write-Step "Staging OWASP Dependency Check v$OWASPDCVersion"
+# ── download + stage Eclipse Temurin JRE 21 ─────────────────────────────────
+Step "Staging Eclipse Temurin JRE 21 LTS"
+if (-not $SkipDownloads) { Download $JREUrl $JREZip }
 
-    if (-not (Test-Path $OWASPDCZipPath)) {
-        Write-Host "    Downloading $OWASPDCZipUrl ..."
-        Invoke-WebRequest -Uri $OWASPDCZipUrl -OutFile $OWASPDCZipPath -UseBasicParsing
-        Write-OK "Downloaded"
-    } else {
-        Write-OK "Zip already downloaded"
+if (Test-Path $JREDir) { Remove-Item $JREDir -Recurse -Force }
+
+# Extract to a clean temp path to avoid issues with '+' in the versioned dir name
+$JRETmp = Join-Path $InstallerDir "_jre_tmp"
+if (Test-Path $JRETmp) { Remove-Item $JRETmp -Recurse -Force }
+Write-Host "    Extracting JRE..."
+Expand-Archive -Path $JREZip -DestinationPath $JRETmp -Force
+
+$JREExtracted = Get-ChildItem -Path $JRETmp -Directory | Select-Object -First 1
+if (-not $JREExtracted) { Fail "Could not find extracted JRE directory under $JRETmp" }
+
+# Move the versioned dir to the stable 'jre' name
+Move-Item -Path $JREExtracted.FullName -Destination $JREDir
+Remove-Item $JRETmp -Recurse -Force -ErrorAction SilentlyContinue
+OK "JRE staged at $JREDir"
+
+# ── download + stage OWASP Dependency Check ──────────────────────────────────
+Step "Staging OWASP Dependency Check v$OWASPDCVer"
+if (-not $SkipDownloads) { Download $OWASPDCUrl $OWASPDCZip }
+
+if (Test-Path $OWASPDCDir) { Remove-Item $OWASPDCDir -Recurse -Force }
+Write-Host "    Extracting OWASP DC..."
+Expand-Archive -Path $OWASPDCZip -DestinationPath $InstallerDir -Force
+# Zip extracts to dependency-check/
+if (-not (Test-Path $OWASPDCDir)) { Fail "Expected $OWASPDCDir after extraction." }
+OK "OWASP DC staged at $OWASPDCDir"
+
+# ── WiX heat -- harvest all three directories ─────────────────────────────────
+Step "Harvesting file manifests with heat.exe"
+
+function Heat {
+    param([string]$SrcDir, [string]$CgId, [string]$DirRef, [string]$VarName,
+          [string]$OutFile, [string]$IdPrefix)
+
+    # Run heat without -suid so it generates path-based unique IDs
+    & $HeatExe dir "$SrcDir" -nologo -gg -sfrag -sreg -srd `
+        -cg $CgId -dr $DirRef -var "var.$VarName" -out "$OutFile"
+    if ($LASTEXITCODE -ne 0) { Fail "heat.exe failed for $CgId" }
+
+    # Post-process: prefix Component/@Id, File/@Id, and Directory/@Id with
+    # $IdPrefix to prevent duplicate-symbol errors when the same Windows DLL
+    # appears in both the PyInstaller bundle and the JRE.
+    # ComponentGroup/@Id is intentionally NOT prefixed -- it is referenced
+    # by name from owasp-scanner.wxs.
+    $xml = [xml](Get-Content $OutFile -Encoding UTF8)
+    foreach ($node in $xml.GetElementsByTagName("Component")) {
+        $id = $node.GetAttribute("Id")
+        if ($id) { $node.SetAttribute("Id", $IdPrefix + $id) }
     }
-
-    if (Test-Path $OWASPDCDir) { Remove-Item $OWASPDCDir -Recurse -Force }
-    Expand-Archive -Path $OWASPDCZipPath -DestinationPath $InstallerDir -Force
-    # The zip extracts to a "dependency-check/" subdirectory
-    Write-OK "OWASP DC extracted to $OWASPDCDir"
-} else {
-    Write-Warn "OWASP Dependency Check will NOT be bundled (-BundleOWASPDC not set)."
-    Write-Warn "Users will download it automatically on their first scan."
-    # Remove any leftover from a previous bundled build
-    if (Test-Path $OWASPDCDir) { Remove-Item $OWASPDCDir -Recurse -Force }
+    foreach ($node in $xml.GetElementsByTagName("File")) {
+        $id = $node.GetAttribute("Id")
+        if ($id) { $node.SetAttribute("Id", $IdPrefix + $id) }
+    }
+    foreach ($node in $xml.GetElementsByTagName("Directory")) {
+        $id = $node.GetAttribute("Id")
+        # Never rename the anchor directory references set by -dr
+        if ($id -and $id -notin @("INSTALLFOLDER","JRE_FOLDER","OWASPDC_FOLDER","TARGETDIR")) {
+            $node.SetAttribute("Id", $IdPrefix + $id)
+        }
+    }
+    # ComponentRef/@Id must match the newly prefixed Component/@Id values
+    foreach ($node in $xml.GetElementsByTagName("ComponentRef")) {
+        $id = $node.GetAttribute("Id")
+        if ($id) { $node.SetAttribute("Id", $IdPrefix + $id) }
+    }
+    $xml.Save($OutFile)
+    OK "$OutFile generated (prefix: $IdPrefix)"
 }
 
-# ---------------------------------------------------------------------------
-# Step 4: Harvest files with WiX heat.exe
-# ---------------------------------------------------------------------------
-Write-Step "Harvesting PyInstaller output with heat.exe"
+Heat $PyDistDir  "AppFileComponents"  "INSTALLFOLDER"   "AppSourceDir"    (Join-Path $InstallerDir "AppFiles.wxs")   "App_"
+Heat $JREDir     "JREComponents"      "JRE_FOLDER"      "JRESourceDir"    (Join-Path $InstallerDir "JREFiles.wxs")   "JRE_"
+Heat $OWASPDCDir "OWASPDCComponents"  "OWASPDC_FOLDER"  "OWASPDCSourceDir" (Join-Path $InstallerDir "OWASPDCFiles.wxs") "DC_"
 
-$AppFilesWxs = Join-Path $InstallerDir "AppFiles.wxs"
-& heat.exe dir "$DistDir" `
-    -nologo `
-    -gg `
-    -sfrag `
-    -sreg `
-    -srd `
-    -suid `
-    -cg AppFileComponents `
-    -dr INSTALLFOLDER `
-    -var var.AppSourceDir `
-    -out "$AppFilesWxs"
-if ($LASTEXITCODE -ne 0) { Fail "heat.exe failed for application files" }
-Write-OK "AppFiles.wxs generated"
-
-# Harvest OWASP DC (only if bundling)
-$OWASPDCFilesWxs = Join-Path $InstallerDir "OWASPDCFiles.wxs"
-if ($BundleOWASPDC -and (Test-Path $OWASPDCDir)) {
-    & heat.exe dir "$OWASPDCDir" `
-        -nologo `
-        -gg `
-        -sfrag `
-        -sreg `
-        -srd `
-        -suid `
-        -cg OWASPDCComponents `
-        -dr OWASP_DC_FOLDER `
-        -var var.OWASPDCSourceDir `
-        -out "$OWASPDCFilesWxs"
-    if ($LASTEXITCODE -ne 0) { Fail "heat.exe failed for OWASP DC" }
-    Write-OK "OWASPDCFiles.wxs generated"
-} else {
-    # Generate an empty fragment so the main .wxs compiles regardless
-    @'
-<?xml version="1.0" encoding="utf-8"?>
-<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Fragment>
-    <ComponentGroup Id="OWASPDCComponents" />
-  </Fragment>
-</Wix>
-'@ | Set-Content $OWASPDCFilesWxs -Encoding UTF8
-    Write-OK "Empty OWASPDCFiles.wxs generated (OWASP DC not bundled)"
-}
-
-# ---------------------------------------------------------------------------
-# Step 5: Compile with candle.exe
-# ---------------------------------------------------------------------------
-Write-Step "Compiling WiX sources with candle.exe"
+# ── WiX candle ──────────────────────────────────────────────────────────────
+Step "Compiling WiX sources with candle.exe"
 
 $WxsSources = @(
     (Join-Path $InstallerDir "owasp-scanner.wxs"),
-    $AppFilesWxs,
-    $OWASPDCFilesWxs
+    (Join-Path $InstallerDir "AppFiles.wxs"),
+    (Join-Path $InstallerDir "JREFiles.wxs"),
+    (Join-Path $InstallerDir "OWASPDCFiles.wxs")
 )
 
-$CandleArgs = @(
-    "-nologo",
-    "-arch", "x64",
-    "-dVersion=$Version",
-    "-dAppSourceDir=$DistDir",
-    "-dOWASPDCSourceDir=$OWASPDCDir",
-    "-ext", "WixUtilExtension",
-    "-out", "$InstallerDir\"
-) + $WxsSources
-
-& candle.exe @CandleArgs
+& $CandleExe -nologo -arch x64 `
+    "-dVersion=$Version" `
+    "-dAppSourceDir=$PyDistDir" `
+    "-dJRESourceDir=$JREDir" `
+    "-dOWASPDCSourceDir=$OWASPDCDir" `
+    -ext WixUtilExtension `
+    -out "$InstallerDir\" `
+    @WxsSources
 if ($LASTEXITCODE -ne 0) { Fail "candle.exe failed" }
-Write-OK "WiX sources compiled"
+OK "WiX sources compiled"
 
-# ---------------------------------------------------------------------------
-# Step 6: Link with light.exe
-# ---------------------------------------------------------------------------
-Write-Step "Linking MSI with light.exe"
+# ── WiX light ───────────────────────────────────────────────────────────────
+Step "Linking MSI with light.exe"
 
-$ObjFiles = Get-ChildItem -Path $InstallerDir -Filter "*.wixobj" | Select-Object -ExpandProperty FullName
+$ObjFiles = Get-ChildItem -Path $InstallerDir -Filter "*.wixobj" |
+    Select-Object -ExpandProperty FullName
 
-$LightArgs = @(
-    "-nologo",
-    "-ext", "WixUIExtension",
-    "-ext", "WixUtilExtension",
-    "-cultures:en-US",
-    "-out", $MsiOutput
-) + $ObjFiles
-
-& light.exe @LightArgs
+& $LightExe -nologo `
+    -ext WixUIExtension `
+    -ext WixUtilExtension `
+    -cultures:en-US `
+    -out $MsiOut `
+    @ObjFiles
 if ($LASTEXITCODE -ne 0) { Fail "light.exe failed" }
 
-# ---------------------------------------------------------------------------
-# Done
-# ---------------------------------------------------------------------------
+# ── done ─────────────────────────────────────────────────────────────────────
+$MsiSize = [math]::Round((Get-Item $MsiOut).Length / 1MB, 1)
 Write-Host ""
-Write-Host "========================================" -ForegroundColor Green
-Write-Host " MSI built successfully!" -ForegroundColor Green
-Write-Host " Output: $MsiOutput" -ForegroundColor Green
-Write-Host "========================================" -ForegroundColor Green
+Write-Host "============================================" -ForegroundColor Green
+Write-Host "  MSI built successfully!" -ForegroundColor Green
+Write-Host "  $MsiOut  ($MsiSize MB)" -ForegroundColor Green
+Write-Host "============================================" -ForegroundColor Green
 Write-Host ""
-if (-not $BundleOWASPDC) {
-    Write-Host "NOTE: OWASP Dependency Check is NOT bundled in this installer." -ForegroundColor Yellow
-    Write-Host "      On first scan the app will download it automatically (~150 MB)." -ForegroundColor Yellow
-    Write-Host "      Re-run with -BundleOWASPDC for an offline installer." -ForegroundColor Yellow
-    Write-Host ""
-}
+Write-Host "Upload to GitHub release:" -ForegroundColor Cyan
+Write-Host "  gh release upload v$Version `"$MsiOut`"" -ForegroundColor White
+Write-Host ""
