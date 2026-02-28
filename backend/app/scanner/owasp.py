@@ -55,7 +55,7 @@ def _build_env() -> dict:
     return env
 
 
-def _run_dc_sync(cmd: list, scan_id: int, log_path: str) -> tuple:
+def _run_dc_sync(cmd, scan_id: int, log_path: str, shell: bool = False) -> tuple:
     """
     Execute dependency-check synchronously; returns (stdout, stderr, returncode).
 
@@ -80,6 +80,7 @@ def _run_dc_sync(cmd: list, scan_id: int, log_path: str) -> tuple:
             encoding="utf-8",
             errors="replace",
             env=_build_env(),
+            shell=shell,
         )
 
         for raw_line in proc.stdout:
@@ -138,20 +139,36 @@ async def run_dependency_check(scan_id: int, file_path: str, session: Session):
     if settings.NVD_API_KEY:
         cmd += ["--nvdApiKey", settings.NVD_API_KEY]
 
-    # On Windows, .bat files must be invoked via cmd /c
+    # On Windows, .bat files cannot be executed directly by subprocess — they
+    # require the shell.  Building a quoted command string and using shell=True
+    # avoids the classic "C:Program is not recognized" error that occurs when
+    # cmd /c receives a path with spaces and strips the outer quotes.
+    use_shell = False
     if _IS_WINDOWS and settings.OWASP_DC_PATH.lower().endswith(".bat"):
-        cmd = ["cmd", "/c"] + cmd
+        cmd = subprocess.list2cmdline(cmd)
+        use_shell = True
 
     try:
         loop = asyncio.get_event_loop()
         stdout, stderr, returncode = await loop.run_in_executor(
-            None, _run_dc_sync, cmd, scan_id, log_path
+            None, lambda: _run_dc_sync(cmd, scan_id, log_path, shell=use_shell)
         )
 
-        # DC 12.x exit codes: 0=clean, 1=vulns found, 2=analysis errors (non-fatal),
-        # 4=update warnings, 8=write warnings; treat report-present as success.
-        if returncode not in (0, 1, 2, 4) and not os.path.exists(report_path):
-            detail = (stderr.strip() or stdout.strip() or f"exit code {returncode}")[:800]
+        # Always verify the report was produced.  If it is missing the scan
+        # failed silently (e.g. wrong DC path, Java error, disk-full) even if
+        # OWASP DC exited with a "success-like" code such as 1 (vulns found) —
+        # which is also what cmd.exe returns when it cannot find a program.
+        if not os.path.exists(report_path):
+            detail = (stdout.strip() or f"exit code {returncode}")[:800]
+            raise RuntimeError(
+                f"dependency-check produced no report (exit {returncode}). "
+                f"Check OWASP_DC_PATH and that Java is available.\n{detail}"
+            )
+
+        # DC exit codes: 0=clean, 1=vulns found, 2=analysis errors (non-fatal),
+        # 4=update warnings; anything else with a report is treated as a warning.
+        if returncode not in (0, 1, 2, 4):
+            detail = (stdout.strip() or f"exit code {returncode}")[:400]
             raise RuntimeError(f"dependency-check failed (exit {returncode}): {detail}")
 
         # Parse results
